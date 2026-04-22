@@ -31,6 +31,11 @@ const bookmarkSchema = new mongoose.Schema(
       default: "",
       trim: true
     },
+    bookmarkType: {
+      type: String,
+      default: "article",
+      trim: true
+    },
     image: {
       type: String,
       default: "",
@@ -40,6 +45,19 @@ const bookmarkSchema = new mongoose.Schema(
       type: String,
       default: "",
       trim: true
+    },
+    whyItMatters: {
+      type: String,
+      default: "",
+      trim: true
+    },
+    keyPoints: {
+      type: [String],
+      default: []
+    },
+    relatedTopics: {
+      type: [String],
+      default: []
     },
     publishedAt: {
       type: String,

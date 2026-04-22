@@ -5,6 +5,7 @@ const techService = require("../services/techService")
 const scienceService = require("../services/scienceService")
 const environmentService = require("../services/environmentService")
 const careerService = require("../services/careerService")
+const { summarizeSingleArticleBrief } = require("../services/articleSummaryService")
 const User = require("../models/User")
 const simplify = require("../utils/simplify")
 const { filterEnglishArticles } = require("../utils/languageFilter")
@@ -504,6 +505,74 @@ function buildArchiveEntry(issue, categoryPayload, personalization, selectedConf
   }
 }
 
+function mergeArticleForSummary(sourceArticle, requestArticle = {}) {
+  return {
+    ...sourceArticle,
+    ...requestArticle,
+    title: String(requestArticle?.title || sourceArticle?.title || "").trim(),
+    description: String(requestArticle?.description || sourceArticle?.description || "").trim(),
+    content: String(requestArticle?.content || sourceArticle?.content || requestArticle?.summary || "").trim(),
+    source: String(requestArticle?.source || sourceArticle?.source || "").trim(),
+    image: requestArticle?.image || sourceArticle?.image || "",
+    publishedAt: requestArticle?.publishedAt || sourceArticle?.publishedAt || "",
+    url: String(
+      requestArticle?.storyUrl
+      || requestArticle?.url
+      || requestArticle?.link
+      || sourceArticle?.url
+      || sourceArticle?.storyUrl
+      || sourceArticle?.link
+      || ""
+    ).trim()
+  }
+}
+
+router.post("/article-brief", async (req, res) => {
+  try {
+    const authUser = getUserFromRequest(req)
+    if (!authUser?.userId) {
+      return res.status(401).json({ error: "Authentication is required." })
+    }
+
+    const user = await User.findById(authUser.userId)
+    const userInterests = Array.isArray(user?.interests) ? user.interests : []
+    const requestArticle = req.body?.article
+    const categoryKey = String(req.body?.categoryKey || "").trim().toLowerCase()
+    const categoryLabel = String(req.body?.categoryLabel || "").trim()
+
+    if (!requestArticle || typeof requestArticle !== "object") {
+      return res.status(400).json({ error: "An article payload is required." })
+    }
+
+    const config = categoryKey ? CATEGORY_CONFIG[categoryKey] : null
+    const articleForBrief = mergeArticleForSummary({}, requestArticle)
+    const effectiveCategoryKey = config?.key || categoryKey || "article_brief"
+    const effectiveCategoryLabel = config?.label || categoryLabel || "Article"
+
+    const brief = await summarizeSingleArticleBrief(articleForBrief, effectiveCategoryKey, {
+      categoryLabel: effectiveCategoryLabel,
+      profile: {
+        interests: userInterests,
+        readerName: user?.name || ""
+      }
+    })
+
+    res.json({
+      brief,
+      article: {
+        title: articleForBrief.title || requestArticle.title || "",
+        source: articleForBrief.source || requestArticle.source || "",
+        publishedAt: articleForBrief.publishedAt || requestArticle.publishedAt || "",
+        storyUrl: articleForBrief.url || requestArticle.storyUrl || requestArticle.url || "",
+        image: articleForBrief.image || requestArticle.image || ""
+      }
+    })
+  } catch (error) {
+    console.error("Single-article brief generation failed:", error.response?.data || error.message)
+    res.status(500).json({ error: "Could not generate the AI brief for this article." })
+  }
+})
+
 router.get("/", async (req, res) => {
 
   try {
@@ -526,7 +595,9 @@ router.get("/", async (req, res) => {
         CATEGORY_CONFIG.careers_industry
       ]
 
-    const categoryResults = await Promise.all(configs.map(async (config) => {
+    const categoryResults = []
+
+    for (const config of configs) {
       const raw = await fetchSafe(config.label, config.service)
       const prepared = config.preprocess(raw)
       const refined = config.refine(prepared)
@@ -538,19 +609,20 @@ router.get("/", async (req, res) => {
         targetMinimum
       )
 
-      return {
+      categoryResults.push({
         key: config.key,
         label: config.label,
         items: finalArticles,
         maxStories: targetMinimum,
         simplified: finalArticles.map((article) => simplify(article, config.key))
-      }
-    }))
+      })
+    }
 
     const issue = await createMagazineIssue(categoryResults.map((result) => ({
       key: result.key,
       label: result.label,
-      items: Object.assign(result.items.slice(), { maxStories: result.maxStories })
+      items: Object.assign(result.items.slice(), { maxStories: result.maxStories }),
+      summarizedItems: result.simplified
     })), {
       interests: userInterests,
       readerName: user?.name || "",

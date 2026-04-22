@@ -24,6 +24,10 @@ function normalizeInterests(values) {
 
 function normalizeBookmark(input) {
   const title = String(input?.title || input?.source || input?.categoryLabel || "Saved article").trim()
+  const normalizeList = (values, maxItems) => (Array.isArray(values) ? values : [])
+    .map((value) => String(value || "").replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .slice(0, maxItems)
 
   const storyUrl = String(input?.storyUrl || input?.url || "").trim()
   const fallbackUrl = String(input?.fallbackUrl || "").trim()
@@ -39,8 +43,12 @@ function normalizeBookmark(input) {
     fallbackUrl,
     source: String(input?.source || "").trim(),
     categoryLabel: String(input?.categoryLabel || "").trim(),
+    bookmarkType: String(input?.bookmarkType || "article").trim().toLowerCase() || "article",
     image: String(input?.image || "").trim(),
     summary: String(input?.summary || "").replace(/\s+/g, " ").trim(),
+    whyItMatters: String(input?.whyItMatters || "").replace(/\s+/g, " ").trim(),
+    keyPoints: normalizeList(input?.keyPoints, 5),
+    relatedTopics: normalizeList(input?.relatedTopics, 8),
     publishedAt: String(input?.publishedAt || "").trim(),
     savedAt: new Date()
   }

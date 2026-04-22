@@ -4,9 +4,124 @@ const simplify = require("../utils/simplify")
 
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434"
 const OLLAMA_GENERATE_URL = `${OLLAMA_BASE_URL}/api/generate`
-const DEFAULT_MODEL = process.env.OLLAMA_MODEL || "llama3.2:3b"
+const DEFAULT_MODEL = process.env.OLLAMA_MODEL || "mistral:latest"
 const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 15000)
 const USE_OLLAMA = String(process.env.USE_OLLAMA || "false").toLowerCase() === "true"
+const USE_OLLAMA_MAGAZINE = String(process.env.USE_OLLAMA_MAGAZINE || "false").toLowerCase() === "true"
+const CONTENT_LIMIT = Number(process.env.OLLAMA_ARTICLE_CONTENT_LIMIT || 1000)
+const ISSUE_RESPONSE_SCHEMA = {
+  type: "object",
+  required: ["cover", "categoryDigests", "closing", "generationNote"],
+  properties: {
+    cover: {
+      type: "object",
+      required: [
+        "title",
+        "subtitle",
+        "theme",
+        "deck",
+        "editorNote",
+        "spotlightWords",
+        "heroStoryTitle",
+        "heroStoryCategory",
+        "heroImage"
+      ],
+      properties: {
+        title: { type: "string" },
+        subtitle: { type: "string" },
+        theme: { type: "string" },
+        deck: { type: "string" },
+        editorNote: { type: "string" },
+        spotlightWords: {
+          type: "array",
+          items: { type: "string" }
+        },
+        heroStoryTitle: { type: "string" },
+        heroStoryCategory: { type: "string" },
+        heroImage: { type: "string" }
+      }
+    },
+    categoryDigests: {
+      type: "array",
+      items: {
+        type: "object",
+        required: [
+          "categoryKey",
+          "categoryLabel",
+          "pageTitle",
+          "intro",
+          "highlightedQuote",
+          "importantTerms",
+          "leadImage",
+          "leadSource",
+          "leadPublishedAt",
+          "articles"
+        ],
+        properties: {
+          categoryKey: { type: "string" },
+          categoryLabel: { type: "string" },
+          pageTitle: { type: "string" },
+          intro: { type: "string" },
+          highlightedQuote: { type: "string" },
+          importantTerms: {
+            type: "array",
+            items: { type: "string" }
+          },
+          leadImage: { type: "string" },
+          leadSource: { type: "string" },
+          leadPublishedAt: { type: "string" },
+          articles: {
+            type: "array",
+            items: {
+              type: "object",
+              required: [
+                "id",
+                "title",
+                "summary",
+                "highlights",
+                "importantTerms",
+                "source",
+                "image",
+                "publishedAt",
+                "storyUrl"
+              ],
+              properties: {
+                id: { type: "string" },
+                title: { type: "string" },
+                summary: { type: "string" },
+                highlights: {
+                  type: "array",
+                  items: { type: "string" }
+                },
+                importantTerms: {
+                  type: "array",
+                  items: { type: "string" }
+                },
+                source: { type: "string" },
+                image: { type: "string" },
+                publishedAt: { type: "string" },
+                storyUrl: { type: "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    closing: {
+      type: "object",
+      required: ["title", "summary", "actionPoints"],
+      properties: {
+        title: { type: "string" },
+        summary: { type: "string" },
+        actionPoints: {
+          type: "array",
+          items: { type: "string" }
+        }
+      }
+    },
+    generationNote: { type: "string" }
+  }
+}
 
 function normalizeSummaryLength(value, fallback = "") {
   const summary = String(value || "").replace(/\s+/g, " ").trim()
@@ -29,16 +144,26 @@ function normalizeSummaryLength(value, fallback = "") {
   return `${words.slice(0, 95).join(" ")}...`
 }
 
-function makeCategoryEntry(key, label, items) {
+function trimContent(value, maxLength = CONTENT_LIMIT) {
+  const text = String(value || "").replace(/\s+/g, " ").trim()
+  if (!text || text.length <= maxLength) {
+    return text
+  }
+
+  return `${text.slice(0, Math.max(0, maxLength - 3)).trim()}...`
+}
+
+function makeCategoryEntry(key, label, items, summarizedItems = []) {
   const maxStories = Math.max(1, Number(items?.maxStories || items?.length || 4))
   return {
     categoryKey: key,
     categoryLabel: label,
     maxStories,
+    summarizedItems: Array.isArray(summarizedItems) ? summarizedItems.slice(0, maxStories) : [],
     stories: items.slice(0, maxStories).map((item) => ({
       title: item.title || "",
       description: item.description || "",
-      content: item.content || "",
+      content: trimContent(item.content),
       source: item.source || "",
       link: item.url || "",
       image: item.image || "",
@@ -93,6 +218,26 @@ function normalizeText(value) {
     .trim()
 }
 
+function findMatchingDigest(digests, group) {
+  const expectedKey = String(group?.categoryKey || "").trim().toLowerCase()
+  const expectedLabel = normalizeText(group?.categoryLabel)
+
+  return (Array.isArray(digests) ? digests : []).find((digest) => {
+    const digestKey = String(digest?.categoryKey || "").trim().toLowerCase()
+    const digestLabel = normalizeText(digest?.categoryLabel)
+
+    if (expectedKey && digestKey && expectedKey === digestKey) {
+      return true
+    }
+
+    if (expectedLabel && digestLabel && expectedLabel === digestLabel) {
+      return true
+    }
+
+    return false
+  }) || null
+}
+
 function findMatchingStory(stories, article) {
   const requestedUrl = String(article?.storyUrl || article?.link || "").trim()
   const requestedTitle = normalizeText(article?.title)
@@ -116,7 +261,9 @@ function findMatchingStory(stories, article) {
 function buildCategoryArticles(group, requestedArticles = []) {
   const maxStories = Math.max(1, Number(group?.maxStories || 4))
   const sourceStories = Array.isArray(group?.stories) ? group.stories.slice(0, maxStories) : []
-  const fallbackArticles = sourceStories.map((story, index) => buildArticleFromStory(story, group.categoryKey, index))
+  const fallbackArticles = sourceStories.map((story, index) => {
+    return group.summarizedItems?.[index] || buildArticleFromStory(story, group.categoryKey, index)
+  })
 
   if (!requestedArticles.length) {
     return fallbackArticles
@@ -140,7 +287,8 @@ function buildCategoryArticles(group, requestedArticles = []) {
       usedUrls.add(storyUrl)
     }
 
-    const baseArticle = buildArticleFromStory(story, group.categoryKey, index)
+    const storyIndex = sourceStories.indexOf(story)
+    const baseArticle = fallbackArticles[storyIndex] || buildArticleFromStory(story, group.categoryKey, index)
     matchedArticles.push({
       ...baseArticle,
       ...article,
@@ -257,73 +405,46 @@ function buildPrompt(groups, profile = {}) {
     ? `Reader interests: ${interests.join(", ")}. Where appropriate, foreground details connected to those interests without inventing facts.`
     : "No explicit reader interests were provided."
 
+  const categoryBlocks = groups.map((group) => {
+    const stories = Array.isArray(group.summarizedItems) && group.summarizedItems.length
+      ? group.summarizedItems
+      : buildCategoryArticles(group)
+
+    const storyBlocks = stories.slice(0, group.maxStories || 4).map((story, index) => [
+      `Article ${index + 1}:`,
+      `Title: ${story.title || ""}`,
+      `Source: ${story.source || ""}`,
+      `Published: ${story.publishedAt || ""}`,
+      `Summary: ${story.summary || ""}`,
+      `Highlights: ${(story.highlights || []).join(" | ")}`,
+      `Important Terms: ${(story.importantTerms || []).join(" | ")}`,
+      `Story URL: ${story.storyUrl || ""}`
+    ].join("\n")).join("\n\n")
+
+    return [
+      `Category: ${group.categoryLabel}`,
+      storyBlocks
+    ].join("\n")
+  }).join("\n\n")
+
   return [
-    "Create an eye-catching digital magazine issue from the provided English-language news groups.",
+    "Create one complete digital magazine issue from the provided English-language article summaries.",
     readerContext,
-    "Requirements:",
-    "- Use only facts that appear in the provided articles. Do not invent details.",
-    "- The tone should feel editorial and polished, not academic or student-focused.",
-    "- Completely exclude cinema and entertainment coverage. Do not include movies, actors, celebrities, trailers, or award-show topics.",
-    "- Build a striking cover page without mentioning paper size, dimensions, or layout specs.",
-    "- For every category, include at least 2 article summaries.",
-    "- Each article summary should be 70 to 95 words and summarize the article only.",
-    "- In each summary, clearly explain what happened, why it matters, and the practical impact for readers.",
-    "- Do not mention students, learning goals, study tips, or audience-purpose language.",
-    "- highlightedQuote should be a short excerpt-style line drawn from the provided article facts.",
-    "- importantTerms should contain 3 to 5 short phrases worth visually highlighting.",
-    "- Keep the writing clear, elegant, and magazine-like.",
-    "- Prefer article images when available.",
-    "- Do not mention paper size, orientation, magazine dimensions, or technical layout details in the copy.",
-    "- Return valid JSON only. Do not include markdown fences or extra commentary.",
-    "- Use this exact JSON shape:",
-    JSON.stringify({
-      cover: {
-        title: "string",
-        subtitle: "string",
-        theme: "string",
-        deck: "string",
-        editorNote: "string",
-        spotlightWords: ["string", "string"],
-        heroStoryTitle: "string",
-        heroStoryCategory: "string",
-        heroImage: "string"
-      },
-      categoryDigests: [
-        {
-          categoryKey: "string",
-          categoryLabel: "string",
-          pageTitle: "string",
-          intro: "string",
-          highlightedQuote: "string",
-          importantTerms: ["string", "string", "string"],
-          leadImage: "string",
-          leadSource: "string",
-          leadPublishedAt: "string",
-          articles: [
-            {
-              id: "string",
-              title: "string",
-              summary: "string",
-              highlights: ["string", "string", "string"],
-              importantTerms: ["string", "string"],
-              source: "string",
-              image: "string",
-              publishedAt: "string",
-              storyUrl: "string"
-            }
-          ]
-        }
-      ],
-      closing: {
-        title: "string",
-        summary: "string",
-        actionPoints: ["string", "string", "string"]
-      },
-      generationNote: "string"
-    }, null, 2),
+    "Rules:",
+    "- Return exactly one top-level JSON object.",
+    "- The top-level object must contain: cover, categoryDigests, closing, generationNote.",
+    "- Do not return a schema, instructions, placeholders, or explanations.",
+    "- Use only facts from the provided summaries and metadata.",
+    "- Keep the tone editorial and polished.",
+    "- For each category, include 2 to 4 article summaries.",
+    "- Each summary should be 70 to 95 words.",
+    "- highlightedQuote must be a short factual line.",
+    "- importantTerms must contain 3 to 5 short phrases.",
+    "- If a value is unavailable, return an empty string or empty array instead of omitting the field.",
+    "- Return raw JSON only.",
     "",
-    "Article groups:",
-    JSON.stringify(groups, null, 2)
+    "Magazine source material:",
+    categoryBlocks
   ].join("\n")
 }
 
@@ -351,29 +472,20 @@ function normalizeIssue(issue, groups, profile = {}) {
   const fallback = buildFallbackIssue(groups, profile)
   const digests = Array.isArray(issue.categoryDigests) ? issue.categoryDigests : []
 
-  if (!digests.length) {
-    return fallback
-  }
-
   return {
     source: issue.source || "ollama",
     cover: {
       ...fallback.cover,
       ...(issue.cover || {})
     },
-    categoryDigests: digests.map((digest, index) => {
-      const sourceGroup = groups[index] || {
-        categoryKey: `category-${index + 1}`,
-        categoryLabel: `Category ${index + 1}`,
-        maxStories: 4,
-        stories: []
-      }
+    categoryDigests: groups.map((sourceGroup, index) => {
+      const digest = findMatchingDigest(digests, sourceGroup)
       const fallbackDigest = fallback.categoryDigests[index] || buildFallbackCategory(sourceGroup, profile)
-      const articles = buildCategoryArticles(sourceGroup, Array.isArray(digest.articles) ? digest.articles : [])
+      const articles = buildCategoryArticles(sourceGroup, Array.isArray(digest?.articles) ? digest.articles : [])
 
       return {
         ...fallbackDigest,
-        ...digest,
+        ...(digest || {}),
         categoryKey: sourceGroup.categoryKey,
         categoryLabel: sourceGroup.categoryLabel,
         leadImage: articles[0]?.image || fallbackDigest.leadImage,
@@ -391,22 +503,32 @@ function normalizeIssue(issue, groups, profile = {}) {
 }
 
 async function createMagazineIssue(rawGroups, profile = {}) {
-  const groups = rawGroups.map((group) => makeCategoryEntry(group.key, group.label, group.items))
+  const groups = rawGroups.map((group) => makeCategoryEntry(
+    group.key,
+    group.label,
+    group.items,
+    group.summarizedItems
+  ))
 
-  if (!USE_OLLAMA) {
+  if (!USE_OLLAMA || !USE_OLLAMA_MAGAZINE) {
+    const reason = !USE_OLLAMA
+      ? "USE_OLLAMA is false"
+      : "USE_OLLAMA_MAGAZINE is false"
+    console.log(`Ollama skipped for magazine generation: ${reason}. Using fallback issue generation.`)
     return buildFallbackIssue(groups, {
       ...profile,
-      generationNote: "Local summarization is active. Ollama generation is disabled."
+      generationNote: "Fast local issue generation is active. Ollama magazine generation is disabled."
     })
   }
 
   try {
+    console.log(`Ollama generation started with model ${DEFAULT_MODEL}.`)
     const response = await axios.post(
       OLLAMA_GENERATE_URL,
       {
         model: DEFAULT_MODEL,
         prompt: buildPrompt(groups, profile),
-        format: "json",
+        format: ISSUE_RESPONSE_SCHEMA,
         stream: false,
         options: {
           temperature: 0.4
@@ -417,15 +539,26 @@ async function createMagazineIssue(rawGroups, profile = {}) {
       }
     )
 
+    console.log("Ollama response received. Extracting JSON output.")
+    console.log(response.data?.response)
     const outputText = extractJson(response.data?.response)
     if (!outputText) {
       throw new Error("Ollama response did not include JSON text.")
     }
 
     const issue = JSON.parse(outputText)
-    return normalizeIssue(issue, groups, profile)
+    console.log("Ollama JSON parsed successfully. Validating generated issue structure.")
+    console.log("Raw Ollama issue keys:", Object.keys(issue || {}))
+    console.log(
+      "Raw Ollama categoryDigests length:",
+      Array.isArray(issue?.categoryDigests) ? issue.categoryDigests.length : "missing"
+    )
+    const normalizedIssue = normalizeIssue(issue, groups, profile)
+    console.log(`Final issue source after normalization: ${normalizedIssue.source}.`)
+    return normalizedIssue
   } catch (error) {
     console.error("Ollama magazine generation failed:", error.response?.data || error.message)
+    console.log("Fallback issue generation is being used instead.")
     return buildFallbackIssue(groups, profile)
   }
 }
